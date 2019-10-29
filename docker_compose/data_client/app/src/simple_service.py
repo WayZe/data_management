@@ -16,6 +16,7 @@ from http import HTTPStatus
 import psycopg2
 from msgpack import packb, unpackb
 from redis import Redis
+from datetime import timedelta, datetime
 
 # файл, куда посыпятся логи модели
 FORMAT = '%(asctime)-15s %(message)s'
@@ -40,11 +41,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Реализуем API /user/watchhistory/user_id
         elif self.path.startswith('/user/watchhistory'):
             response = self.get_user_watch_history()
+        # Реализуем API /user/watchhistory/user_id
+        elif self.path.startswith('/user/count'):
+            response = self.get_user_count()
         return response
 
     def get_user_profile(self) -> dict:
         user_id = self.path.split('/')[-1]
-        logging.info(f'Поступил запрос по пользователю user_id={user_id}')
+        logging.info(f'Поступил запрос профиля по пользователю user_id={user_id}')
         redis_profile_key = f'profile:{user_id}'
         # проверяем наличие объекта в Redis-кеше
         if redis_interactor.is_cached(redis_profile_key):
@@ -68,18 +72,69 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             redis_interactor.set_data(redis_profile_key, response)
         return response
 
-    def get_user_watch_history(self) -> dict:
-        """ВАШ КОД ТУТ
+    def get_user_watch_history(self) -> dict:    
+        line = str(self.path)
+        user_id = int(line[line.find('y') + 1:line.find('?')])
+        date = line[line.find('=') + 1:]
+        max_history_date = int((datetime.strptime(date, '%Y-%m-%d') + timedelta(1)).timestamp())
+        logging.info(f'Поступил запрос истории просмотров пользователя {user_id} по дате {date}')
+        key = str(max_history_date) + str(user_id)
+        redis_watchhistory_key = f'watchhistory:{key}'
+        # проверяем наличие объекта в Redis-кеше
+        if redis_interactor.is_cached(redis_watchhistory_key):
+            logging.info(f'История просмотров пользователя {user_id} по дате {date} присутствует в кеше')
+            response_list = redis_interactor.get_data(redis_watchhistory_key)
+        # если ключ отcутствует в кеше - выполняем "тяжёлый" SQL-запрос в Postgres
+        else:
+            logging.info(f'История просмотров пользователя {user_id} по дате {date} отсутствует в кеше, выполняем запрос к Postgres')
+            user_watchhistory = [None, None]  # [num_rating, avg_rating]
+            try:
+                user_watchhistory = postgres_interactor.get_sql_result(
+                    f"""
+                        SELECT movieid, rating, timestamp
+                        FROM ratings
+                        WHERE userId = {user_id} AND 
+                        timestamp < {max_history_date}
+                        ORDER BY timestamp"""
+                )
+            except Exception as e:
+                logging.info(f'Произошла ошибка запроса истории пользователя к Postgres:\n{e}')
 
-        Для каждого переданного user_id API должен возвращать историю оценок, которые ставил этот user_id в виде
+            response_list = list()
+            for record in user_watchhistory:
+                response_dict = {"movieid": record[0], 
+                     "rating": record[1], 
+                     "timestamp": datetime.fromtimestamp(int(record[2])).strftime('%Y-%m-%d %H:%M:%S')}
+                response_list.append(response_dict)
 
-        [
-            {"movie_id": 4119470, "rating": 4, "timestamp": "2019-09-03 10:00:00"},
-            {"movie_id": 5691170, "rating": 2, "timestamp": "2019-09-05 13:23:00"},
-            {"movie_id": 3341191, "rating": 5, "timestamp": "2019-09-08 16:40:00"}
-        ]
-        """
-        return dict()
+            logging.info(f'Сохраняем историю пользователя пользователя {user_id} по дате {date} в Redis-кеш')
+            redis_interactor.set_data(redis_watchhistory_key, response_list)
+
+        return response_list
+
+    def get_user_count(self) -> dict:
+        user_id = self.path.split('/')[-1]
+        logging.info(f'Поступил запрос количества пользователей')
+        redis_count_key = f'count'
+        # проверяем наличие объекта в Redis-кеше
+        if redis_interactor.is_cached(redis_count_key):
+            logging.info(f'Количество пользователей присутствует в кеше')
+            response = redis_interactor.get_data(redis_count_key)
+        # если ключ отcутствует в кеше - выполняем "тяжёлый" SQL-запрос в Postgres
+        else:
+            logging.info(f'Количество пользователей отсутствует в кеше, выполняем запрос к Postgres')
+            user_count = int()
+            try:
+                user_count = postgres_interactor.get_sql_result(
+                    f"""
+                    SELECT COUNT(DISTINCT userid) FROM ratings"""
+                )[0]
+            except Exception as e:
+                logging.info(f'Произошла ошибка запроса к Postgres:\n{e}')
+            response = {'count': int(user_count[0])}
+            logging.info(f'Сохраняем количество пользователей в Redis-кеш')
+            redis_interactor.set_data(redis_count_key, response)
+        return response
 
     def do_GET(self):
         # заголовки ответа
