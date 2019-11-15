@@ -17,6 +17,7 @@ import psycopg2
 from msgpack import packb, unpackb
 from redis import Redis
 from datetime import timedelta, datetime
+from pymongo import MongoClient
 
 # файл, куда посыпятся логи модели
 FORMAT = '%(asctime)-15s %(message)s'
@@ -44,6 +45,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Реализуем API /user/watchhistory/user_id
         elif self.path.startswith('/user/count'):
             response = self.get_user_count()
+        # Реализуем API /movie/tags/movie_id
+        elif self.path.startswith('/movie/tags'):
+            response = self.get_tags()
         return response
 
     def get_user_profile(self) -> dict:
@@ -109,7 +113,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
             logging.info(f'Сохраняем историю пользователя пользователя {user_id} по дате {date} в Redis-кеш')
             redis_interactor.set_data(redis_watchhistory_key, response_list)
-
         return response_list
 
     def get_user_count(self) -> dict:
@@ -136,6 +139,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             redis_interactor.set_data(redis_count_key, response)
         return response
 
+    def get_tags(self) -> dict:
+        movie_id = self.path.split('/')[-1]
+        doc = {"movie_id" : f'{movie_id}'}, {"_id" : 0}
+        curs = mongo_interactor.get_data(doc)
+        response = list()
+        for c in curs:
+            response.append(c) 
+        return response
+
     def do_GET(self):
         # заголовки ответа
         self.send_response(HTTPStatus.OK)
@@ -143,6 +155,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(self.get_response()).encode())
 
+class MongoStorage:
+    def __init__(self):
+        mongo_conf = {
+            'host': os.environ['APP_MONGO_HOST'],
+            'port': int(os.environ['APP_MONGO_PORT'])
+        }
+        storage = MongoClient(**mongo_conf)
+        self.mongo_recsys_storage = storage.get_database("movies")
+
+    def get_data(self, doc):
+        collection = self.mongo_recsys_storage.get_collection("tags")
+        mongo_doc = collection.find(doc[0], doc[1])
+        return mongo_doc
 
 class PostgresStorage:
     def __init__(self):
@@ -202,6 +227,8 @@ postgres_interactor = PostgresStorage()
 logging.info('Инициализирован класс для работы с Postgres')
 redis_interactor = RedisStorage()
 logging.info('Инициализирован класс для работы с Redis')
+mongo_interactor = MongoStorage()
+logging.info('Инициализирован класс для работы с Mongo')
 if os.path.exists(log_file_name):
     os.chmod(log_file_name, 0o0777)
 
